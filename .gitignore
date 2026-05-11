@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+models/
+data/
+logs/
+backups/
+*.pem
+*.log
+*.db
+
+# Backups and old versions
+*.aws
+*.old
+*.backup-*
+
+# Environment variables (we'll create this next)
+.env
+
+# Notebooks
+.ipynb_checkpoints/
