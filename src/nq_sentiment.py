@@ -100,9 +100,9 @@ logger.info("📂 Loading models...")
 try:
     sentiment_classifier = joblib.load(os.path.join(MODEL_DIR, 'sentiment_model.pkl'))
     vectorizer = joblib.load(os.path.join(MODEL_DIR, 'vectorizer.pkl'))
-    volatility_model = load_model(os.path.join(MODEL_DIR, 'nq_intraday_volatility_multifeature_lstm.keras'))
-    scaler_X = joblib.load(os.path.join(MODEL_DIR, 'intraday_multifeature_scaler_X.pkl'))
-    scaler_y = joblib.load(os.path.join(MODEL_DIR, 'intraday_multifeature_scaler_y.pkl'))
+    volatility_model = load_model(os.path.join(MODEL_DIR, 'nq_intraday_volatility_v2_delta.keras'))
+    scaler_X = joblib.load(os.path.join(MODEL_DIR, 'intraday_v2_scaler_X.pkl'))
+    scaler_y = joblib.load(os.path.join(MODEL_DIR, 'intraday_v2_scaler_y.pkl'))
     logger.info("✅ All models loaded!")
 except Exception as e:
     logger.error(f"❌ Error loading models: {e}")
@@ -246,20 +246,26 @@ def predict_intraday_volatility():
         X_scaled_2d = scaler_X.transform(X_2d)
         X_scaled_3d = X_scaled_2d.reshape(1, 48, 5)
 
-        # Predict
+        # Predict (v2 model outputs DELTA from current volatility, not level)
         y_pred_scaled = volatility_model.predict(X_scaled_3d, verbose=0)
-        y_pred = scaler_y.inverse_transform(y_pred_scaled)[0, 0]
+        predicted_delta = scaler_y.inverse_transform(y_pred_scaled)[0, 0]
 
         # Get current volatility, 4h average, and current price
         current_vol = nq['Volatility'].values[-1]
         last_4h_avg = np.mean(nq['Volatility'].values[-48:])
         current_nq_price = nq['Close'].iloc[-1]
 
+        # Convert delta to level for the return value
+        predicted_level = current_vol + predicted_delta
+
+        # Clamp at zero — volatility cannot be negative
+        predicted_level = max(predicted_level, 0.0)
+
         return {
-            'predicted_next_hour': float(y_pred),
+            'predicted_next_hour': float(predicted_level),
             'current': float(current_vol),
             'last_4h_avg': float(last_4h_avg),
-            'change': float(y_pred - current_vol),
+            'change': float(predicted_delta),
             'nq_price': float(current_nq_price)
         }
 
@@ -446,6 +452,7 @@ while True:
             # Special: Run at 8:00 AM for market open
             should_run = True
             last_run_hour = 8
+
 
         if should_run:
             update_count += 1
