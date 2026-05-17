@@ -1,0 +1,7 @@
+streamlit==1.57.0
+pandas==2.3.3
+numpy==2.4.0
+boto3==1.43.9
+botocore==1.43.9
+python-dateutil==2.9.0.post0
+pytz==2025.2
