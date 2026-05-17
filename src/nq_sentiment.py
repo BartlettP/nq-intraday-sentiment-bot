@@ -11,7 +11,9 @@ import pytz
 from tensorflow.keras.models import load_model
 import logging
 from logging.handlers import RotatingFileHandler
-from database import init_db, insert_prediction, get_predictions_needing_outcomes, update_outcome
+from database import init_db, insert_prediction, get_predictions_needing_outcomes, update_outcome, DB_PATH
+import boto3
+from botocore.exceptions import ClientError
 from pathlib import Path
 
 
@@ -68,6 +70,28 @@ DISCORD_WEBHOOK_URL = _env.get('DISCORD_WEBHOOK_URL') or os.environ.get('DISCORD
 if not DISCORD_WEBHOOK_URL:
     logger.error("DISCORD_WEBHOOK_URL not found in .env or environment variables")
     exit(1)
+# S3 sync configuration — credentials and bucket loaded from .env or environment
+S3_BUCKET = _env.get('S3_BUCKET') or os.environ.get('S3_BUCKET')
+AWS_ACCESS_KEY = _env.get('AWS_ACCESS_KEY_ID') or os.environ.get('AWS_ACCESS_KEY_ID')
+AWS_SECRET_KEY = _env.get('AWS_SECRET_ACCESS_KEY') or os.environ.get('AWS_SECRET_ACCESS_KEY')
+S3_REGION = _env.get('AWS_REGION') or os.environ.get('AWS_REGION') or 'us-east-2'
+
+s3_client = None
+if S3_BUCKET and AWS_ACCESS_KEY and AWS_SECRET_KEY:
+    try:
+        s3_client = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+            region_name=S3_REGION
+        )
+        logger.info(f"✅ S3 sync enabled (bucket: {S3_BUCKET})")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not initialize S3 client: {e}")
+        s3_client = None
+else:
+    logger.info("ℹ️ S3 sync disabled (credentials not configured)")
+
 
 ET = pytz.timezone('US/Eastern')
 PRE_MARKET_START = time(8, 0)
@@ -416,6 +440,27 @@ News: {sentiment['bullish']}🟢 / {sentiment['bearish']}🔴
         logger.warning(f"   ⚠️ Discord error: {e}")
 
 
+def upload_db_to_s3():
+    """Upload the predictions database to S3 for the dashboard to read."""
+    if s3_client is None:
+        return False
+
+    try:
+        if not os.path.exists(DB_PATH):
+            logger.warning("   ⚠️ Database file not found for S3 upload")
+            return False
+
+        s3_client.upload_file(DB_PATH, S3_BUCKET, 'predictions.db')
+        logger.info("   ☁️ Uploaded database to S3")
+        return True
+    except ClientError as e:
+        logger.error(f"   ❌ S3 upload failed: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"   ❌ Unexpected error during S3 upload: {e}")
+        return False
+
+
 # === MAIN LOOP ===
 
 logger.info("🚀 NQ INTRADAY BOT STARTED")
@@ -443,6 +488,7 @@ while True:
 
         # Run at :05 each hour (or at market open 8:00 AM)
         should_run = False
+
 
         if current_minute == 5 and current_hour != last_run_hour:
             # Regular hourly update at :05
@@ -492,6 +538,9 @@ while True:
                 pred_id = insert_prediction(sentiment, volatility, signal_text)
                 logger.info(f"📊 Recorded prediction #{pred_id}")
                 update_past_outcomes()
+
+                # Upload database to S3 so dashboard can read latest data
+                upload_db_to_s3()
 
             if sentiment:
                 previous_score = sentiment['score']
