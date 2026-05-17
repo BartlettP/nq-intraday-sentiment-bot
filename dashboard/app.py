@@ -8,11 +8,61 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import os
+import boto3
+import tempfile
 from datetime import datetime
+from botocore.exceptions import ClientError
 
-# Path to the database (relative to this file)
+# S3 configuration (read from environment variables on Render)
+S3_BUCKET = os.environ.get('S3_BUCKET')
+AWS_ACCESS_KEY = os.environ.get('AWS_ACCESS_KEY_ID')
+AWS_SECRET_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
+S3_REGION = os.environ.get('AWS_REGION', 'us-east-2')
+
+# Local fallback path (used when running locally and S3 not configured)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(SCRIPT_DIR, '..', 'data', 'predictions.db')
+LOCAL_DB_PATH = os.path.join(SCRIPT_DIR, '..', 'data', 'predictions.db')
+
+
+@st.cache_data(ttl=60)  # Cache for 60 seconds to avoid hammering S3
+def download_db_from_s3():
+    """Download the predictions database from S3 to a temp file. Returns path or None."""
+    if not (S3_BUCKET and AWS_ACCESS_KEY and AWS_SECRET_KEY):
+        return None
+
+    try:
+        s3 = boto3.client(
+            's3',
+            aws_access_key_id=AWS_ACCESS_KEY,
+            aws_secret_access_key=AWS_SECRET_KEY,
+            region_name=S3_REGION
+        )
+
+        # Download to a temp file
+        tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        tmp_file.close()
+        s3.download_file(S3_BUCKET, 'predictions.db', tmp_file.name)
+        return tmp_file.name
+    except ClientError as e:
+        st.error(f"Could not download database from S3: {e}")
+        return None
+    except Exception as e:
+        st.error(f"Unexpected error downloading from S3: {e}")
+        return None
+
+
+def get_db_path():
+    """Try S3 first, fall back to local file."""
+    s3_path = download_db_from_s3()
+    if s3_path is not None:
+        return s3_path
+    elif os.path.exists(LOCAL_DB_PATH):
+        return LOCAL_DB_PATH
+    else:
+        return None
+
+
+DB_PATH = get_db_path()
 
 # Page setup
 st.set_page_config(
@@ -27,7 +77,7 @@ st.caption("Live ML-powered volatility forecasting for NQ futures")
 
 def load_data():
     """Load all predictions from the database."""
-    if not os.path.exists(DB_PATH):
+    if DB_PATH is None or not os.path.exists(DB_PATH):
         return pd.DataFrame()
     conn = sqlite3.connect(DB_PATH)
     df = pd.read_sql_query(
