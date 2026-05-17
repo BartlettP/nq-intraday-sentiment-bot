@@ -1,204 +1,97 @@
-import yfinance as yf
-import pandas as pd
+"""
+Backtest the bot's predictions against actual realized volatility.
+Reads from predictions.db (the production database).
+"""
+import sqlite3
+import os
+from datetime import datetime, timedelta
 import numpy as np
-from datetime import datetime
-import pytz
 
-# Your predictions from Discord (manually extracted)
-predictions = [
-    # 1/15/2026 (Wednesday)
-    {'date': '2026-01-15', 'time': '11:05', 'predicted': 0.105},
-    {'date': '2026-01-15', 'time': '12:05', 'predicted': 0.063},
-    {'date': '2026-01-15', 'time': '13:05', 'predicted': 0.049},
-    {'date': '2026-01-15', 'time': '14:05', 'predicted': 0.043},
-    {'date': '2026-01-15', 'time': '15:05', 'predicted': 0.066},
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(SCRIPT_DIR, '..', 'data', 'predictions.db')
 
-    # 1/16/2026 (Thursday)
-    {'date': '2026-01-16', 'time': '08:00', 'predicted': 0.034},
-    {'date': '2026-01-16', 'time': '09:05', 'predicted': 0.046},
-    {'date': '2026-01-16', 'time': '10:05', 'predicted': 0.085},
-    {'date': '2026-01-16', 'time': '11:05', 'predicted': 0.108},
-    {'date': '2026-01-16', 'time': '12:05', 'predicted': 0.070},
-    {'date': '2026-01-16', 'time': '13:05', 'predicted': 0.041},
-    {'date': '2026-01-16', 'time': '14:05', 'predicted': 0.039},
-    {'date': '2026-01-16', 'time': '15:05', 'predicted': 0.054},
 
-    # 1/19/2026 (Sunday - Holiday?) - All same prediction 0.083
-    # Skipping these as they look like a data issue
+def load_predictions_with_outcomes(days=None, after_timestamp=None):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
 
-    # 1/20/2026 (Monday)
-    {'date': '2026-01-20', 'time': '08:00', 'predicted': 0.058},
-    {'date': '2026-01-20', 'time': '09:05', 'predicted': 0.096},
-    {'date': '2026-01-20', 'time': '10:05', 'predicted': 0.144},
-    {'date': '2026-01-20', 'time': '11:05', 'predicted': 0.080},
-    {'date': '2026-01-20', 'time': '12:05', 'predicted': 0.115},
-    {'date': '2026-01-20', 'time': '13:05', 'predicted': 0.091},
-    {'date': '2026-01-20', 'time': '14:05', 'predicted': 0.071},
-    {'date': '2026-01-20', 'time': '15:05', 'predicted': 0.075},
+    query = '''
+        SELECT id, timestamp, predicted_volatility, current_volatility,
+               actual_volatility, sentiment_score
+        FROM predictions
+        WHERE actual_volatility IS NOT NULL
+    '''
+    params = []
 
-    # 1/21/2026 (Tuesday)
-    {'date': '2026-01-21', 'time': '08:00', 'predicted': 0.058},
-    {'date': '2026-01-21', 'time': '09:05', 'predicted': 0.087},
-    {'date': '2026-01-21', 'time': '11:05', 'predicted': 0.064},
-    {'date': '2026-01-21', 'time': '12:05', 'predicted': 0.148},
-    {'date': '2026-01-21', 'time': '13:05', 'predicted': 0.155},
-    {'date': '2026-01-21', 'time': '14:05', 'predicted': 0.112},
-    {'date': '2026-01-21', 'time': '15:05', 'predicted': 0.133},
+    if days is not None:
+        cutoff = (datetime.utcnow() - timedelta(days=days)).isoformat()
+        query += ' AND datetime(timestamp) >= datetime(?)'
+        params.append(cutoff)
 
-    # 1/22/2026 (Today/Wednesday)
-    {'date': '2026-01-22', 'time': '08:00', 'predicted': 0.027},
-    {'date': '2026-01-22', 'time': '09:05', 'predicted': 0.066},
-    {'date': '2026-01-22', 'time': '10:05', 'predicted': 0.136},
-    {'date': '2026-01-22', 'time': '11:05', 'predicted': 0.101},
-    {'date': '2026-01-22', 'time': '12:05', 'predicted': 0.053},
-    {'date': '2026-01-22', 'time': '13:05', 'predicted': 0.042},
-    {'date': '2026-01-22', 'time': '14:05', 'predicted': 0.035},
-    {'date': '2026-01-22', 'time': '15:05', 'predicted': 0.043},
-]
+    if after_timestamp is not None:
+        query += ' AND datetime(timestamp) >= datetime(?)'
+        params.append(after_timestamp)
 
-# Download NQ data
-print("Downloading NQ data...")
-nq = yf.download('NQ=F', start='2026-01-15', end='2026-01-23', interval='5m', progress=False)
+    query += ' ORDER BY id ASC'
 
-if isinstance(nq.columns, pd.MultiIndex):
-    nq.columns = nq.columns.get_level_values(0)
+    rows = list(conn.execute(query, params))
+    conn.close()
+    return rows
 
-# Calculate volatility
-nq['Returns'] = nq['Close'].pct_change()
-nq['Volatility'] = nq['Returns'].rolling(window=12).std() * 100
-nq = nq.dropna()
 
-# Convert to ET
-ET = pytz.timezone('US/Eastern')
-nq.index = nq.index.tz_convert('US/Eastern')
+def compute_metrics(rows, label=""):
+    if not rows:
+        print(f"\n{label}: No data")
+        return
 
-# Calculate actuals for each prediction
-results = []
-for pred in predictions:
-    pred_datetime = pd.Timestamp(f"{pred['date']} {pred['time']}", tz='US/Eastern')
+    predicted = np.array([r['predicted_volatility'] for r in rows])
+    actual = np.array([r['actual_volatility'] for r in rows])
+    current = np.array([
+        r['current_volatility'] if r['current_volatility'] is not None else np.nan
+        for r in rows
+    ])
 
-    # Find actual data 1 hour later
-    one_hour_later = pred_datetime + pd.Timedelta(hours=1)
+    mae = np.mean(np.abs(predicted - actual))
+    rmse = np.sqrt(np.mean((predicted - actual) ** 2))
+    correlation = np.corrcoef(predicted, actual)[0, 1] if len(predicted) > 1 else float('nan')
 
-    # Get volatility data for next hour
-    mask = (nq.index > pred_datetime) & (nq.index <= one_hour_later)
-    next_hour_data = nq.loc[mask, 'Volatility']
+    print(f"\n{'='*60}")
+    print(f"{label}")
+    print(f"{'='*60}")
+    print(f"  Predictions evaluated: {len(rows)}")
+    print(f"  Mean predicted vol: {predicted.mean():.4f}%")
+    print(f"  Mean actual vol:    {actual.mean():.4f}%")
+    print(f"  MAE:                {mae:.4f}%")
+    print(f"  RMSE:               {rmse:.4f}%")
+    print(f"  Correlation:        {correlation:.4f}")
 
-    if len(next_hour_data) > 0:
-        actual = next_hour_data.mean()
-        error = abs(pred['predicted'] - actual)
+    valid_current = ~np.isnan(current)
+    if valid_current.sum() == len(actual):
+        baseline_mae = np.mean(np.abs(actual - current))
+        beats_baseline_pct = (baseline_mae - mae) / baseline_mae * 100
 
-        results.append({
-            'datetime': pred_datetime,
-            'predicted': pred['predicted'],
-            'actual': actual,
-            'error': error,
-            'error_pct': (error / actual * 100) if actual > 0 else 0
-        })
+        print(f"\n  Persistence baseline MAE: {baseline_mae:.4f}%")
+        print(f"  Model MAE:                {mae:.4f}%")
+        if mae < baseline_mae:
+            print(f"  ✅ Model beats baseline by: {beats_baseline_pct:.1f}%")
+        else:
+            print(f"  ❌ Baseline beats model by: {-beats_baseline_pct:.1f}%")
 
-# Analysis
-if results:
-    df = pd.DataFrame(results)
+        actual_delta = actual - current
+        pred_delta = predicted - current
+        correct_dir = np.sum(np.sign(actual_delta) == np.sign(pred_delta))
+        directional = correct_dir / len(actual_delta) * 100
+        print(f"\n  Directional accuracy: {directional:.1f}% (random: 50%)")
 
-    print("\n" + "=" * 70)
-    print("FULL WEEK ACCURACY ANALYSIS")
-    print("=" * 70)
 
-    print(f"\n📊 Overall Performance ({len(results)} predictions):")
-    print(f"   Average Error (MAE): {df['error'].mean():.4f}%")
-    print(f"   Median Error: {df['error'].median():.4f}%")
-    print(f"   Best Prediction: {df['error'].min():.4f}%")
-    print(f"   Worst Prediction: {df['error'].max():.4f}%")
-    print(f"   Std Dev of Errors: {df['error'].std():.4f}%")
+if __name__ == '__main__':
+    print("\n📊 NQ Bot Backtest")
+    print(f"   Database: {DB_PATH}")
+    print(f"   Run at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # Compare to test set
-    print(f"\n🎯 Comparison to Test Set:")
-    print(f"   Test MAE: 0.0102%")
-    print(f"   Production MAE: {df['error'].mean():.4f}%")
-    if df['error'].mean() < 0.0102:
-        print(f"   ✅ Better than test! (+{((0.0102 - df['error'].mean()) / 0.0102 * 100):.1f}%)")
-    else:
-        print(f"   ⚠️ Slightly worse ({((df['error'].mean() - 0.0102) / 0.0102 * 100):.1f}% higher error)")
+    all_rows = load_predictions_with_outcomes()
+    compute_metrics(all_rows, label="📈 ALL-TIME")
 
-    # Directional accuracy
-    print(f"\n📈 Directional Analysis:")
-    df['actual_change'] = df['actual'].diff()
-    df['pred_change'] = df['predicted'].diff()
-    df_direction = df[1:]  # Skip first row (no previous to compare)
-
-    correct_direction = ((df_direction['actual_change'] > 0) == (df_direction['pred_change'] > 0)).sum()
-    directional_acc = correct_direction / len(df_direction) * 100
-
-    print(f"   Directional Accuracy: {directional_acc:.1f}%")
-    print(f"   Test Directional: 66.7%")
-    print(f"   Random Guess: 50%")
-
-    # By time of day
-    print(f"\n⏰ Performance by Time of Day:")
-    df['hour'] = df['datetime'].dt.hour
-    for hour in sorted(df['hour'].unique()):
-        hour_data = df[df['hour'] == hour]
-        print(f"   {hour:2d}:00 - MAE: {hour_data['error'].mean():.4f}% ({len(hour_data)} predictions)")
-
-    # Print worst predictions
-    print(f"\n❌ Top 5 Worst Predictions:")
-    worst = df.nlargest(5, 'error')[['datetime', 'predicted', 'actual', 'error']]
-    for idx, row in worst.iterrows():
-        print(
-            f"   {row['datetime'].strftime('%m/%d %I:%M %p')}: Pred {row['predicted']:.3f}%, Actual {row['actual']:.3f}%, Error {row['error']:.4f}%")
-
-    # Print best predictions
-    print(f"\n✅ Top 5 Best Predictions:")
-    best = df.nsmallest(5, 'error')[['datetime', 'predicted', 'actual', 'error']]
-    for idx, row in best.iterrows():
-        print(
-            f"   {row['datetime'].strftime('%m/%d %I:%M %p')}: Pred {row['predicted']:.3f}%, Actual {row['actual']:.3f}%, Error {row['error']:.4f}%")
-
-    import pandas as pd
-
-    # From your results
-    # Classify by date
-    df['week'] = df['datetime'].dt.date.apply(
-        lambda x: 'Week 1 (Normal)' if x <= pd.Timestamp('2026-01-16').date()
-        else 'Week 2 (News Event)'
-    )
-
-    print("\n" + "=" * 60)
-    print("PERFORMANCE BY MARKET REGIME")
-    print("=" * 60)
-
-    for week in ['Week 1 (Normal)', 'Week 2 (News Event)']:
-        week_data = df[df['week'] == week]
-        print(f"\n{week}:")
-        print(f"  Predictions: {len(week_data)}")
-        print(f"  MAE: {week_data['error'].mean():.4f}%")
-        print(f"  Median Error: {week_data['error'].median():.4f}%")
-        print(f"  Max Error: {week_data['error'].max():.4f}%")
-
-    # Check if NQ actually went up during bullish sentiment
-    # Download NQ daily closes
-    nq_daily = yf.download('NQ=F', start='2026-01-15', end='2026-01-23', interval='1d')
-
-    print("\n" + "=" * 60)
-    print("NQ DAILY PERFORMANCE")
-    print("=" * 60)
-
-    # Handle MultiIndex columns if present
-    if isinstance(nq_daily.columns, pd.MultiIndex):
-        nq_daily.columns = nq_daily.columns.get_level_values(0)
-
-    # Calculate daily changes
-    nq_daily['Prev_Close'] = nq_daily['Close'].shift(1)
-    nq_daily['Change_Pct'] = ((nq_daily['Close'] - nq_daily['Prev_Close']) / nq_daily['Prev_Close'] * 100)
-
-    # Print results
-    for date in nq_daily.index:
-        change = nq_daily.loc[date, 'Change_Pct']
-
-        if not pd.isna(change):
-            direction = "📈 UP" if change > 0 else "📉 DOWN"
-            print(f"{date.date()}: {direction} {change:+.2f}%")
-
-    # Compare to your sentiment scores
-    print("\nYour average sentiment: +28 (Bullish)")
-    print("Did NQ trend match sentiment?")
+    V2_DEPLOY_TIME = '2026-05-13 20:00:00'
+    v2_rows = load_predictions_with_outcomes(after_timestamp=V2_DEPLOY_TIME)
+    compute_metrics(v2_rows, label=f"🚀 V2 ONLY (since {V2_DEPLOY_TIME})")
