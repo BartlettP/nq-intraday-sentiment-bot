@@ -11,7 +11,14 @@ import os
 import boto3
 import tempfile
 from datetime import datetime
+import sys
+from pathlib import Path
 from botocore.exceptions import ClientError
+# Allow imports from src/
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+
+from calendar_events import get_upcoming_events, get_events_within
+
 
 # S3 configuration (read from environment variables on Render)
 S3_BUCKET = os.environ.get('S3_BUCKET')
@@ -121,15 +128,79 @@ st.header("Recent Predictions vs. Actuals")
 df_with_outcomes = df[df['actual_volatility'].notna()].copy()
 
 if not df_with_outcomes.empty:
-    chart_df = df_with_outcomes.tail(60).set_index('timestamp')[
-        ['predicted_volatility', 'actual_volatility']
-    ]
-    st.line_chart(chart_df)
+    chart_df = df_with_outcomes.tail(60).copy()
+
+    import plotly.graph_objects as go
+
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=chart_df['timestamp'],
+        y=chart_df['actual_volatility'],
+        name='Actual Volatility',
+        line=dict(color='#1f77b4', width=2),
+        hovertemplate='<b>%{x|%b %d %I:%M %p}</b><br>Actual: %{y:.3f}%<extra></extra>'
+    ))
+
+    fig.add_trace(go.Scatter(
+        x=chart_df['timestamp'],
+        y=chart_df['predicted_volatility'],
+        name='Predicted Volatility',
+        line=dict(color='#ff7f0e', width=2, dash='dash'),
+        hovertemplate='<b>%{x|%b %d %I:%M %p}</b><br>Predicted: %{y:.3f}%<extra></extra>'
+    ))
+
+    fig.update_layout(
+        xaxis_title='Time',
+        yaxis_title='Volatility (%)',
+        hovermode='x unified',
+        height=400,
+        margin=dict(l=20, r=20, t=30, b=20),
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1)
+    )
+
+    st.plotly_chart(fig, use_container_width=True)
     st.caption(
         "Predictions shown by calendar timestamp. Gaps reflect overnight and weekend periods when the bot doesn't run (RTH-only, 8 AM – 4 PM ET, weekdays)."
     )
 else:
     st.info("No predictions with outcomes yet. Outcomes are filled in an hour after each prediction.")
+# === NEW: Upcoming Economic Events ===
+st.header("📅 Upcoming Economic Events")
+
+try:
+    from datetime import datetime
+    import pytz
+
+    ET = pytz.timezone('US/Eastern')
+
+    # Get high-impact events for next 14 days
+    high_impact_events = get_upcoming_events(impact_levels=('high',), days_ahead=14)
+
+    # Get imminent events (next 4 hours)
+    imminent = get_events_within(minutes=240, impact_levels=('high', 'medium'))
+
+    if imminent:
+        for event in imminent[:3]:
+            minutes = int((event['datetime_et'] - datetime.now(ET)).total_seconds() / 60)
+            if event['impact'] == 'high':
+                st.warning(f"⚠️ **{event['name']}** in {minutes} min ({event['datetime_et'].strftime('%I:%M %p ET')})")
+            else:
+                st.info(f"📅 {event['name']} in {minutes} min ({event['datetime_et'].strftime('%I:%M %p ET')})")
+
+    if high_impact_events:
+        events_data = []
+        for e in high_impact_events[:10]:
+            events_data.append({
+                'When': e['datetime_et'].strftime('%a %b %d, %I:%M %p ET'),
+                'Event': e['name'],
+            })
+        st.dataframe(pd.DataFrame(events_data), hide_index=True, width='stretch')
+    else:
+        st.info("No high-impact events scheduled in the next 14 days.")
+
+except Exception as e:
+    st.warning(f"Could not fetch economic calendar: {e}")
 
 # Recent predictions table
 st.header("Recent Predictions")
@@ -143,7 +214,7 @@ for col in ['sentiment_score', 'predicted_volatility', 'current_volatility', 'ac
     display_df[col] = display_df[col].apply(
         lambda x: f"{x:.3f}" if pd.notna(x) else "—"
     )
-st.dataframe(display_df, use_container_width=True, hide_index=True)
+st.dataframe(display_df, width='stretch', hide_index=True)
 
 # Summary stats
 st.header("Performance Summary")
