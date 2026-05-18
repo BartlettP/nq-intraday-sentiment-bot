@@ -428,7 +428,7 @@ News: {sentiment['bullish']}🟢 / {sentiment['bearish']}🔴
             "title": f"📊 NQ Update - {datetime.now(ET).strftime('%I:%M %p')}",
             "description": description,
             "color": color,
-            "footer": {"text": "Updates every hour at :05"}
+            "footer": {"text": "Updates every hour"}
         }]
     }
 
@@ -464,7 +464,7 @@ def upload_db_to_s3():
 # === MAIN LOOP ===
 
 logger.info("🚀 NQ INTRADAY BOT STARTED")
-logger.info("Sentiment + Intraday Volatility | Updates at :05 each hour")
+logger.info("Sentiment + Intraday Volatility | Updates at each hour")
 
 previous_score = None
 update_count = 0
@@ -486,18 +486,14 @@ while True:
         current_hour = now_et.hour
         current_minute = now_et.minute
 
-        # Run at :05 each hour (or at market open 8:00 AM)
+        # Run at each hour
         should_run = False
 
 
-        if current_minute == 5 and current_hour != last_run_hour:
-            # Regular hourly update at :05
+        if current_minute == 0 and current_hour != last_run_hour:
+            # Regular hourly update
             should_run = True
             last_run_hour = current_hour
-        elif current_hour == 8 and current_minute == 0 and last_run_hour != 8:
-            # Special: Run at 8:00 AM for market open
-            should_run = True
-            last_run_hour = 8
 
 
         if should_run:
