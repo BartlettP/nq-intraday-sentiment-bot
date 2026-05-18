@@ -15,6 +15,7 @@ from database import init_db, insert_prediction, get_predictions_needing_outcome
 import boto3
 from botocore.exceptions import ClientError
 from pathlib import Path
+from calendar_events import get_next_event_info, get_events_within, format_event_for_message
 
 
 
@@ -188,6 +189,39 @@ def scrape_news():
 
     return headlines
 
+def get_event_context_for_discord():
+    """Returns a formatted block of upcoming high-impact events for Discord."""
+    try:
+        # Events in next 2 hours (highest priority - imminent)
+        imminent = get_events_within(minutes=120, impact_levels=('high',))
+
+        # All upcoming high-impact events (next 14 days)
+        upcoming = get_upcoming_events(impact_levels=('high',))
+
+        lines = []
+
+        # Show imminent events with the warning emoji
+        for e in imminent[:1]:  # max 1 imminent event
+            minutes = int((e['datetime_et'] - datetime.now(ET)).total_seconds() / 60)
+            lines.append(f"⚠️ {e['name']} in {minutes}min")
+
+        # Show next 2-3 upcoming (non-imminent) high-impact events
+        non_imminent = [e for e in upcoming if e not in imminent]
+        if not lines:  # no imminent events, show upcoming
+            for e in non_imminent[:2]:
+                lines.append(f"📅 {e['name']} — {e['datetime_et'].strftime('%a %b %d %I:%M %p ET')}")
+        elif non_imminent:  # we have imminent, also show one more upcoming
+            e = non_imminent[0]
+            lines.append(f"📅 Next: {e['name']} — {e['datetime_et'].strftime('%a %b %d %I:%M %p ET')}")
+
+        if not lines:
+            return ""
+
+        return "📅 **Upcoming:**\n" + "\n".join(lines)
+
+    except Exception as e:
+        logger.warning(f"   ⚠️ Calendar fetch failed (continuing): {e}")
+        return ""
 
 def analyze_sentiment(headlines):
     if not headlines:
@@ -313,6 +347,8 @@ def get_volatility_context(vol_pct):
         return "🔥 EXTREME", "Very volatile, caution advised"
 
 
+
+
 def generate_signal(sentiment, volatility):
     if not sentiment or not volatility:
         return "⚠️ Insufficient data"
@@ -413,12 +449,17 @@ def send_discord(sentiment, volatility, shift_info=None):
 
     # Build message
     description = f"""**Next Hour: {vol_pct:.3f}%** {vol_label}
-Expected Range: **±{nq_range:.0f} points**
+    Expected Range: **±{nq_range:.0f} points**
 
-**Sentiment: {sentiment['score']:+.1f}** {sent_label}
-News: {sentiment['bullish']}🟢 / {sentiment['bearish']}🔴
+    **Sentiment: {sentiment['score']:+.1f}** {sent_label}
+    News: {sentiment['bullish']}🟢 / {sentiment['bearish']}🔴
 
-**Signal:** {signal}"""
+    **Signal:** {signal}"""
+
+    # Add upcoming event context if available
+    event_context = get_event_context_for_discord()
+    if event_context:
+        description = f"{description}\n\n{event_context}"
 
     if shift_info:
         description = f"🚨 **Sentiment Shift:** {shift_info}\n\n{description}"
@@ -431,7 +472,6 @@ News: {sentiment['bullish']}🟢 / {sentiment['bearish']}🔴
             "footer": {"text": "Updates every hour"}
         }]
     }
-
     try:
         response = requests.post(DISCORD_WEBHOOK_URL, json=embed)
         if response.status_code == 204:
@@ -441,8 +481,17 @@ News: {sentiment['bullish']}🟢 / {sentiment['bearish']}🔴
 
 
 def upload_db_to_s3():
-    """Upload the predictions database to S3 for the dashboard to read."""
+    """Upload the predictions database to S3 for the dashboard to read.
+    Only uploads when running on AWS (skips local test runs)."""
+    import socket
+
     if s3_client is None:
+        return False
+
+    # Safety check: only upload from AWS, not local test runs
+    hostname = socket.gethostname()
+    if not hostname.startswith('ip-'):
+        logger.info("   ℹ️ Skipping S3 upload (not running on AWS production)")
         return False
 
     try:
@@ -494,7 +543,6 @@ while True:
             # Regular hourly update
             should_run = True
             last_run_hour = current_hour
-
 
         if should_run:
             update_count += 1
