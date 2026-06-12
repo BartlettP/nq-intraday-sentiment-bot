@@ -128,7 +128,7 @@ st.header("Recent Predictions vs. Actuals")
 df_with_outcomes = df[df['actual_volatility'].notna()].copy()
 
 if not df_with_outcomes.empty:
-    chart_df = df_with_outcomes.tail(60).copy()
+    chart_df = df_with_outcomes.head(60).copy().sort_values('timestamp')
 
     import plotly.graph_objects as go
 
