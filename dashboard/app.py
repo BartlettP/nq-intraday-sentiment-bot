@@ -18,17 +18,20 @@ from botocore.exceptions import ClientError
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
 from calendar_events import get_upcoming_events, get_events_within
+import config
 
-
-# S3 configuration (read from environment variables on Render)
-S3_BUCKET = os.environ.get('S3_BUCKET')
-AWS_ACCESS_KEY = os.environ.get('AWS_ACCESS_KEY_ID')
-AWS_SECRET_KEY = os.environ.get('AWS_SECRET_ACCESS_KEY')
-S3_REGION = os.environ.get('AWS_REGION', 'us-east-2')
+# S3 configuration (read from .env locally, environment variables on Render)
+S3_BUCKET = config.S3_BUCKET
+S3_KEY = config.S3_KEY
+AWS_ACCESS_KEY = config.AWS_ACCESS_KEY
+AWS_SECRET_KEY = config.AWS_SECRET_KEY
+S3_REGION = config.S3_REGION
 
 # Local fallback path (used when running locally and S3 not configured)
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LOCAL_DB_PATH = os.path.join(SCRIPT_DIR, '..', 'data', 'predictions.db')
+LOCAL_DB_PATH = config.DB_PATH
+
+# Predictions land hourly, so nothing newer than this means a cycle was missed.
+STALE_AFTER_MINUTES = 90
 
 
 @st.cache_data(ttl=60)  # Cache for 60 seconds to avoid hammering S3
@@ -48,7 +51,7 @@ def download_db_from_s3():
         # Download to a temp file
         tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
         tmp_file.close()
-        s3.download_file(S3_BUCKET, 'predictions.db', tmp_file.name)
+        s3.download_file(S3_BUCKET, S3_KEY, tmp_file.name)
         return tmp_file.name
     except ClientError as e:
         st.error(f"Could not download database from S3: {e}")
@@ -101,6 +104,25 @@ df = load_data()
 if df.empty:
     st.error("No data available. Make sure the database exists.")
     st.stop()
+
+# === Bot liveness ===
+# Without this, a dead bot looks identical to a healthy one — the page just
+# keeps showing the last prediction it ever made.
+latest_ts = pd.to_datetime(df['timestamp'].max())
+if latest_ts.tzinfo is None:
+    latest_ts = latest_ts.tz_localize('UTC')
+age_minutes = (pd.Timestamp.now(tz='UTC') - latest_ts).total_seconds() / 60
+
+if age_minutes > STALE_AFTER_MINUTES:
+    if age_minutes < 60 * 24:
+        age_text = f"{age_minutes / 60:.1f} hours"
+    else:
+        age_text = f"{age_minutes / 1440:.1f} days"
+    st.error(
+        f"⚠️ **Stale data** — the most recent prediction is {age_text} old. "
+        f"Predictions should arrive hourly during market hours (8 AM – 4 PM ET, "
+        f"weekdays), so the bot may not be running."
+    )
 
 # Latest prediction panel
 st.header("Latest Signal")
@@ -222,9 +244,15 @@ if not df_with_outcomes.empty:
     n = len(df_with_outcomes)
     mae = (df_with_outcomes['predicted_volatility'] - df_with_outcomes['actual_volatility']).abs().mean()
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("Predictions with Outcomes", n)
     col2.metric("Mean Absolute Error", f"{mae:.4f}%")
+    col4.metric(
+        "Last Prediction",
+        f"{age_minutes:.0f} min ago" if age_minutes < 120 else f"{age_minutes / 60:.1f} hrs ago",
+        delta="stale" if age_minutes > STALE_AFTER_MINUTES else "live",
+        delta_color="inverse" if age_minutes > STALE_AFTER_MINUTES else "normal",
+    )
 
     # Persistence baseline comparison
     if df_with_outcomes['current_volatility'].notna().all():

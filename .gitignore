@@ -34,3 +34,9 @@ backups/
 
 # Notebooks
 .ipynb_checkpoints/
+# Testing
+.pytest_cache/
+.coverage
+
+# Pre-merge database backups
+*.db.pre-merge-*

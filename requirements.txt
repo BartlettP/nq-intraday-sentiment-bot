@@ -1,6 +1,9 @@
 # Core ML & data
 tensorflow==2.20.0
-scikit-learn==1.8.0
+# Pinned to the version the models in models/ were pickled with. Loading them
+# under a different scikit-learn raises InconsistentVersionWarning and may
+# produce invalid results. Re-fit and re-pickle before bumping this.
+scikit-learn==1.6.1
 numpy==2.4.0
 pandas==2.3.3
 scipy==1.16.3
@@ -15,10 +18,12 @@ requests==2.32.5
 beautifulsoup4==4.14.3
 python-dateutil==2.9.0.post0
 pytz==2025.2
+python-dotenv==1.2.2
 
 # AWS
 boto3==1.43.9
 botocore==1.43.9
 
-# Dashboard
+# Dashboard (see dashboard/requirements.txt for the deploy-only subset)
 streamlit==1.57.0
+plotly==6.7.0
