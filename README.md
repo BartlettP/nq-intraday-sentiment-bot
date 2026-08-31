@@ -14,16 +14,25 @@ An automated market analysis system that combines news-sentiment classification 
 ```
 financial-sentiment/
 ├── src/
-│   ├── nq_sentiment.py     # Main bot
-│   └── database.py         # SQLite persistence layer
+│   ├── config.py            # Paths, credentials, shared thresholds
+│   ├── nq_sentiment.py      # Main bot
+│   ├── database.py          # SQLite persistence layer
+│   └── calendar_events.py   # Finnhub economic calendar
+├── dashboard/
+│   └── app.py               # Streamlit dashboard
 ├── scripts/
-│   ├── inspect_nq_data.py        # Quick NQ data inspector
-│   └── backtest_predictions.py   # Historical accuracy analysis
+│   ├── inspect_nq_data.py         # Quick NQ data inspector
+│   ├── backtest_predictions.py    # Historical accuracy analysis
+│   ├── db_health.py               # Liveness check (exits non-zero if stale)
+│   └── evaluate_sentiment.py      # Is the sentiment input earning its keep?
+├── tests/                   # pytest suite
+├── archive/                 # Abandoned experiments — see archive/README.md
 ├── models/                  # Not committed - see Setup
 ├── data/                    # SQLite database - not committed
 ├── logs/                    # Runtime logs - not committed
 └── requirements.txt
 ```
+
 ## Setup
 
 ### Local Development
@@ -32,10 +41,28 @@ financial-sentiment/
 2. Create a virtual environment: `python -m venv .venv && .venv\Scripts\activate`
 3. Install dependencies: `pip install -r requirements.txt`
 4. Obtain trained model files (see below) and place in `models/`
-5. Create a `.env` file with `DISCORD_WEBHOOK_URL=<your-webhook-url>`
+5. Create a `.env` file (see Configuration)
 6. Run: `python src/nq_sentiment.py`
 
-### Model Files
+### Configuration
+
+All configuration resolves through `src/config.py`, which reads `.env` first and
+then the real environment. Recognised keys:
+
+| Key | Required | Purpose |
+|---|---|---|
+| `DISCORD_WEBHOOK_URL` | yes | Where signals are posted |
+| `FINNHUB_API_KEY` | no | Economic calendar; the calendar block is skipped without it |
+| `S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | no | Database sync for the dashboard |
+| `AWS_REGION` | no | Defaults to `us-east-2` |
+| `S3_KEY` | no | Object key for the synced database (default `predictions.db`) |
+| `NQ_ENV` | on the server | Set to `production` to enable S3 upload |
+| `NQ_DB_PATH` | no | Override the database location (default `data/predictions.db`) |
+
+**`NQ_ENV=production` must be set on the server.** The bot only uploads to S3 in
+production. It falls back to the old `hostname.startswith('ip-')` check when
+`NQ_ENV` is unset, but that breaks on any non-default host name.
+
 ### Model Files
 
 The trained models are not committed to keep the repo lightweight. The current production model (v2) consists of:
@@ -51,7 +78,45 @@ The v1 model files are retained for rollback purposes:
 - `intraday_multifeature_scaler_X.pkl`
 - `intraday_multifeature_scaler_y.pkl`
 
-To regenerate: see the training notebook in `notebooks/`.
+> **scikit-learn is pinned to 1.6.1** because that is the version the `.pkl`
+> files were written with. Loading them under a different version raises
+> `InconsistentVersionWarning` and may produce invalid results. Re-fit and
+> re-pickle before bumping the pin.
+
+### Feature engineering note
+
+`Time_Normalized` is derived from the **UTC** hour of each bar, which is what
+the model was trained on — the fitted scaler's mean of 0.6678 corresponds to
+16:00 UTC, the midpoint of the RTH session. Do not convert this feature to ET
+without retraining; it would shift the input roughly 1.7σ out of distribution.
+
+Because the feature is absolute UTC clock time, the DST transition shifts the
+session's representation by one hour (~0.43σ). Expect a possible accuracy change
+after DST boundaries until the feature is redefined as minutes-since-open.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+130 tests covering the persistence layer, signal thresholds, trading-hours
+math, feed scraping, the outcome-backfill queue, and the economic calendar.
+No test touches the network.
+
+## Operations
+
+```bash
+python scripts/db_health.py          # exits 1 if no prediction in 90 min
+python scripts/backtest_predictions.py
+python scripts/evaluate_sentiment.py
+python download_db.py                # pull the production DB from S3
+```
+
+`db_health.py` is designed for cron or a systemd timer — it exits non-zero when
+the newest prediction is stale, which is the only automated signal that the bot
+has stopped.
 
 ### Performance
 
@@ -73,6 +138,65 @@ The original model predicted absolute volatility levels and underperformed a per
 Pivoting to delta prediction (Phase 2) and restricting training data to regular trading hours produced the v2 results above.
 
 Recent live performance is available via `scripts/backtest_predictions.py`.
+
+### Per-hour bias correction
+
+The v2 model predicts a *decrease* in volatility at nearly every hour — its
+predicted deltas carry ~38% of the standard deviation of actual ones and are
+negative ~71% of the time. That matches the afternoon, when volatility really
+does decay, but it is badly wrong across the 9:30 open, where realized
+volatility rises on **96.6% of days** and the model predicted a rise only 13.8%
+of the time. Training used `rth_only: true`, so the model never saw the
+pre-open → open ramp and cannot represent it.
+
+`database.get_hourly_bias_corrections()` measures the systematic miss per ET
+hour and adds it back. Walk-forward (each prediction corrected using only
+earlier same-hour observations, no lookahead, 168 out-of-sample rows):
+
+| | MAE | vs persistence | Directional |
+|---|---|---|---|
+| Raw model | 0.0350 | +5.1% | 48.8% |
+| **+ bias correction** | **0.0282** | **+23.4%** | **74.4%** |
+
+Per hour, it repairs exactly where the model was inverted:
+
+| Hour (ET) | Raw | Corrected |
+|---|---|---|
+| 8:00 | 23.8% | 66.7% |
+| 9:00 | **9.5%** | **95.2%** |
+| 10:00 | 28.6% | 85.7% |
+
+Two properties worth preserving if you touch this:
+
+- The correction is learned from `predicted_volatility_raw`, **never** from an
+  already-corrected prediction. Learning from corrected values would fold each
+  correction into the next and compound without limit. There are tests for this.
+- An hour with fewer than `MIN_BIAS_SAMPLES` (8) observations gets a correction
+  of 0.0 rather than one fitted to noise, so new hours degrade to raw output.
+
+`predicted_volatility` always stores what the bot published; the uncorrected
+output goes to `predicted_volatility_raw`. Set `NQ_BIAS_CORRECTION=0` to publish
+raw. Re-check it periodically with `python scripts/backtest_predictions.py`,
+which prints the walk-forward comparison and says whether the correction is
+still earning its place.
+
+The deeper fix is retraining without `rth_only` so the model learns the ramp
+directly; the correction is a cheaper substitute that needs no retraining.
+
+### Known issue: the sentiment input carries no signal
+
+Measured over 242 live predictions (`scripts/evaluate_sentiment.py`):
+
+- The sentiment score has **never been negative** (range +3.30 to +44.26), so
+  the `s < -20` gate has never fired and both BEARISH signals are unreachable.
+- Correlation with realized volatility is **+0.06**; with next-hour NQ return,
+  **-0.02**. Directional hit rate is 48.6% against a 49.0% base rate.
+
+The classifier itself is sound on clear-cut headlines, but it is binary with no
+Neutral class, so mundane headlines are forced to one side and average out to a
+constant positive offset. Fixing it means scoring against a rolling baseline,
+gating on `predict_proba` confidence, or retraining with a Neutral class.
+
 ## Tech Stack
 
-Python 3.12, TensorFlow/Keras, scikit-learn, pandas, NumPy, yfinance, AWS EC2, systemd, SQLite
+Python 3.13, TensorFlow/Keras, scikit-learn, pandas, NumPy, yfinance, AWS EC2, systemd, SQLite
