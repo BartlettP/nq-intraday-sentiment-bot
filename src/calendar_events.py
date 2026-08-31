@@ -9,28 +9,13 @@ import requests
 import logging
 import time
 from datetime import datetime, timedelta
-from pathlib import Path
 import pytz
+
+import config
 
 logger = logging.getLogger(__name__)
 
-
-# Load .env if not already loaded by the parent script
-def _load_env_for_key():
-    env_path = Path(__file__).parent.parent / '.env'
-    if env_path.exists():
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
-                    key = key.strip()
-                    if key == 'FINNHUB_API_KEY':
-                        return value.strip()
-    return os.environ.get('FINNHUB_API_KEY')
-
-
-FINNHUB_API_KEY = _load_env_for_key()
+FINNHUB_API_KEY = config.FINNHUB_API_KEY
 ET = pytz.timezone('US/Eastern')
 UTC = pytz.UTC
 
