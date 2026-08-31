@@ -125,14 +125,14 @@ alongside the realized outcome. All figures below are measured against a
 persistence baseline that simply predicts "no change" — the bar a volatility
 model has to clear to be worth running at all.
 
-#### Live production (242 predictions, the number that matters)
+#### Live production (584 predictions, the number that matters)
 
 | | MAE | vs persistence | Directional |
 |---|---|---|---|
-| Raw v2 model | 0.0350 | +5.1% | 48.8% |
-| **Deployed (+ per-hour bias correction)** | **0.0282** | **+23.4%** | **74.4%** |
+| Raw v2 model | 0.0275 | +6.3% | 54.4% |
+| **Deployed (+ per-hour bias correction)** | **0.0231** | **+21.3%** | **75.7%** |
 
-Measured walk-forward with no lookahead over 168 out-of-sample predictions.
+Measured walk-forward with no lookahead over 518 out-of-sample predictions.
 Reproduce with `python scripts/backtest_predictions.py`.
 
 The raw model does not perform in production the way it did in training: its
@@ -168,20 +168,20 @@ The v2 model predicts a *decrease* in volatility at nearly every hour — its
 predicted deltas carry ~38% of the standard deviation of actual ones and are
 negative ~71% of the time. That matches the afternoon, when volatility really
 does decay, but it is badly wrong across the 9:30 open, where realized
-volatility rises on **96.6% of days** and the model predicted a rise only 13.8%
-of the time. Training used `rth_only: true`, so the model never saw the
+volatility rises on the overwhelming majority of days while the model
+predicts a rise only ~14% of the time. Training used `rth_only: true`, so the model never saw the
 pre-open → open ramp and cannot represent it.
 
 `database.get_hourly_bias_corrections()` measures the systematic miss per ET
 hour and adds it back. The aggregate effect is in the Performance table above
-(+5.1% → +23.4% over the baseline, 48.8% → 74.4% directional). Per hour, it
+(+6.3% → +21.3% over the baseline, 54.4% → 75.7% directional). Per hour, it
 repairs exactly where the model was inverted:
 
-| Hour (ET) | Raw | Corrected |
-|---|---|---|
-| 8:00 | 23.8% | 66.7% |
-| 9:00 | **9.5%** | **95.2%** |
-| 10:00 | 28.6% | 85.7% |
+| Hour (ET) | n | Raw | Corrected |
+|---|---|---|---|
+| 8:00 | 73 | 47.9% | 79.5% |
+| 9:00 | 73 | **16.4%** | **93.2%** |
+| 10:00 | 73 | 31.5% | 80.8% |
 
 Two properties worth preserving if you touch this:
 
