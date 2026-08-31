@@ -5,7 +5,7 @@ An automated market analysis system that combines news-sentiment classification 
 ## Architecture
 
 - **Sentiment classifier**: TF-IDF + logistic regression trained on labeled financial headlines, scoring news from 16 financial RSS feeds
-- **Volatility forecaster**: Multi-feature LSTM trained on 5-minute NQ futures bars predicting next-hour realized volatility
+- **Volatility forecaster**: Multi-feature LSTM trained on 5-minute NQ futures bars predicting next-hour realized volatility, with a self-learning per-hour bias correction applied on top
 - **Persistence**: SQLite database recording every prediction and the actual realized outcome for ongoing evaluation
 - **Deployment**: AWS EC2, managed by systemd with auto-restart on failure
 - **Notification**: Discord webhook posts signal updates hourly during 8 AM - 4 PM ET
@@ -120,24 +120,47 @@ has stopped.
 
 ### Performance
 
-The system has been continuously running in production since April 2026, collecting hourly predictions paired with actual outcomes via SQLite persistence.
+Running in production since April 2026, recording every hourly prediction
+alongside the realized outcome. All figures below are measured against a
+persistence baseline that simply predicts "no change" — the bar a volatility
+model has to clear to be worth running at all.
 
-### Model v2 (current — delta prediction)
+#### Live production (242 predictions, the number that matters)
 
-The current model predicts the *change* in volatility rather than the absolute level, evaluated against a persistence baseline that simply predicts "no change":
+| | MAE | vs persistence | Directional |
+|---|---|---|---|
+| Raw v2 model | 0.0350 | +5.1% | 48.8% |
+| **Deployed (+ per-hour bias correction)** | **0.0282** | **+23.4%** | **74.4%** |
 
-- **MAE: 0.0127% on volatility levels**
-- **Beats persistence baseline by 23.5%** on point-estimate MAE
-- **Directional accuracy: 70.9%** (vs. 50% random baseline)
-- Correlation with actuals: 0.86
+Measured walk-forward with no lookahead over 168 out-of-sample predictions.
+Reproduce with `python scripts/backtest_predictions.py`.
 
-### Model v1 (previous — level prediction)
+The raw model does not perform in production the way it did in training: its
+directional accuracy is a coin flip, because it predicts a *decrease* at nearly
+every hour and so is systematically wrong across the 9:30 open. The per-hour
+bias correction described below recovers that, and the deployed system now
+roughly matches the original training-holdout numbers.
+
+#### Training holdout (model v2)
+
+These are the numbers from model development, on held-out data — **not**
+production performance. They are recorded here for provenance; the live table
+above supersedes them.
+
+- MAE 0.0127% on volatility levels
+- Beats persistence baseline by 22.9%
+- Directional accuracy 70.9%
+- Correlation with actuals 0.867
+
+The gap between these and the raw live numbers is the reason the bias
+correction exists. Most of it is attributable to the model never having seen
+the pre-open → open transition (`rth_only: true` in training).
+
+#### Model v1 (previous — level prediction)
 
 The original model predicted absolute volatility levels and underperformed a persistence baseline on point-estimate MAE while still achieving 0.84 correlation and 53.7% directional accuracy. This is a known failure mode for highly autocorrelated time series — the model regressed toward the mean rather than predicting changes.
 
-Pivoting to delta prediction (Phase 2) and restricting training data to regular trading hours produced the v2 results above.
-
-Recent live performance is available via `scripts/backtest_predictions.py`.
+Pivoting to delta prediction (Phase 2) and restricting training data to regular trading hours produced the v2 training results above. Note that the same RTH restriction is what later cost the model the open transition in live trading.
 
 ### Per-hour bias correction
 
@@ -150,15 +173,9 @@ of the time. Training used `rth_only: true`, so the model never saw the
 pre-open → open ramp and cannot represent it.
 
 `database.get_hourly_bias_corrections()` measures the systematic miss per ET
-hour and adds it back. Walk-forward (each prediction corrected using only
-earlier same-hour observations, no lookahead, 168 out-of-sample rows):
-
-| | MAE | vs persistence | Directional |
-|---|---|---|---|
-| Raw model | 0.0350 | +5.1% | 48.8% |
-| **+ bias correction** | **0.0282** | **+23.4%** | **74.4%** |
-
-Per hour, it repairs exactly where the model was inverted:
+hour and adds it back. The aggregate effect is in the Performance table above
+(+5.1% → +23.4% over the baseline, 48.8% → 74.4% directional). Per hour, it
+repairs exactly where the model was inverted:
 
 | Hour (ET) | Raw | Corrected |
 |---|---|---|
