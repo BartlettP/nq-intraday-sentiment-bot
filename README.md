@@ -6,6 +6,7 @@ An automated market analysis system that combines news-sentiment classification 
 
 - **Sentiment classifier**: TF-IDF + logistic regression trained on labeled financial headlines, scoring news from 16 financial RSS feeds
 - **Volatility forecaster**: Multi-feature LSTM trained on 5-minute NQ futures bars predicting next-hour realized volatility, with a self-learning per-hour bias correction applied on top
+- **Economic calendar**: high-impact US events from the free ForexFactory weekly feed (no API key); the feed covers the current week, so the lookahead is 0-7 days
 - **Persistence**: SQLite database recording every prediction and the actual realized outcome for ongoing evaluation
 - **Deployment**: AWS EC2, managed by systemd with auto-restart on failure
 - **Notification**: Discord webhook posts signal updates hourly during 8 AM - 4 PM ET
@@ -17,7 +18,7 @@ financial-sentiment/
 │   ├── config.py            # Paths, credentials, shared thresholds
 │   ├── nq_sentiment.py      # Main bot
 │   ├── database.py          # SQLite persistence layer
-│   └── calendar_events.py   # Finnhub economic calendar
+│   └── calendar_events.py   # ForexFactory economic calendar
 ├── dashboard/
 │   └── app.py               # Streamlit dashboard
 ├── scripts/
@@ -52,7 +53,6 @@ then the real environment. Recognised keys:
 | Key | Required | Purpose |
 |---|---|---|
 | `DISCORD_WEBHOOK_URL` | yes | Where signals are posted |
-| `FINNHUB_API_KEY` | no | Economic calendar; the calendar block is skipped without it |
 | `S3_BUCKET`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | no | Database sync for the dashboard |
 | `AWS_REGION` | no | Defaults to `us-east-2` |
 | `S3_KEY` | no | Object key for the synced database (default `predictions.db`) |

@@ -271,7 +271,7 @@ class TestEventContext:
 
     def test_calendar_failure_degrades_quietly(self, bot, monkeypatch):
         def boom(**kwargs):
-            raise RuntimeError("finnhub down")
+            raise RuntimeError("calendar feed down")
         monkeypatch.setattr(bot, 'get_events_within', boom)
         assert bot.get_event_context_for_discord() == ""
 

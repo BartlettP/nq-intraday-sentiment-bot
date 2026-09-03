@@ -48,7 +48,6 @@ DB_PATH = str(Path(env('NQ_DB_PATH', str(DATA_DIR / 'predictions.db'))))
 # === CREDENTIALS ===
 
 DISCORD_WEBHOOK_URL = env('DISCORD_WEBHOOK_URL')
-FINNHUB_API_KEY = env('FINNHUB_API_KEY')
 
 S3_BUCKET = env('S3_BUCKET')
 S3_KEY = env('S3_KEY', 'predictions.db')

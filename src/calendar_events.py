@@ -1,21 +1,27 @@
 """
-Economic calendar integration via Finnhub API.
+Economic calendar integration via the ForexFactory weekly feed.
 
 Fetches upcoming high-impact US economic events to provide context
 for the volatility prediction model.
+
+The feed covers the current week only, so the practical lookahead is 0-7 days
+rather than the 14 the callers ask for. That is enough for the imminent-event
+warning, which is the part that feeds the signal; the longer-horizon "next up"
+line in Discord just shows fewer events later in the week.
+
+Events are normalised to the shape the rest of this module expects:
+country 'US', a lowercase impact, and a UTC 'YYYY-MM-DD HH:MM:SS' timestamp.
 """
-import os
 import requests
 import logging
 import time
 from datetime import datetime, timedelta
 import pytz
 
-import config
-
 logger = logging.getLogger(__name__)
 
-FINNHUB_API_KEY = config.FINNHUB_API_KEY
+CALENDAR_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+
 ET = pytz.timezone('US/Eastern')
 UTC = pytz.UTC
 
@@ -23,28 +29,68 @@ UTC = pytz.UTC
 _cache = {'data': None, 'fetched_at': 0}
 _CACHE_TTL_SECONDS = 6 * 60 * 60  # 6 hours
 
+# The feed is unofficial and unauthenticated, so a silent switch to returning
+# nothing is a real failure mode. Count consecutive empty fetches and complain
+# once it stops looking like a quiet week.
+_empty_fetches = 0
+_EMPTY_FETCH_WARN_THRESHOLD = 4  # 4 * 6h cache TTL ~= a full day of nothing
+
 
 def _fetch_calendar(days_ahead=14):
-    """Fetch upcoming events from Finnhub. Returns list of event dicts."""
-    if not FINNHUB_API_KEY:
-        logger.warning("FINNHUB_API_KEY not set; calendar disabled")
-        return []
+    """Fetch this week's US events from ForexFactory. Returns list of event dicts.
 
-    start = datetime.now(UTC).strftime('%Y-%m-%d')
-    end = (datetime.now(UTC) + timedelta(days=days_ahead)).strftime('%Y-%m-%d')
+    days_ahead is an upper bound only - the feed never reaches beyond the
+    current week regardless of what is asked for.
+    """
+    global _empty_fetches
 
-    url = "https://finnhub.io/api/v1/calendar/economic"
-    params = {'from': start, 'to': end, 'token': FINNHUB_API_KEY}
+    cutoff = datetime.now(UTC) + timedelta(days=days_ahead)
 
     try:
-        response = requests.get(url, params=params, timeout=10)
+        response = requests.get(
+            CALENDAR_URL,
+            headers={'User-Agent': 'Mozilla/5.0'},
+            timeout=10,
+        )
         response.raise_for_status()
-        data = response.json()
-        events = data.get('economicCalendar', [])
-        return events
+        raw = response.json()
     except Exception as e:
-        logger.error(f"Failed to fetch calendar from Finnhub: {e}")
+        logger.error(f"Failed to fetch calendar from ForexFactory: {e}")
         return []
+
+    events = []
+    for e in raw:
+        if e.get('country') != 'USD':
+            continue
+        try:
+            # e.g. '2026-09-04T08:30:00-04:00' - already offset-aware.
+            event_utc = datetime.fromisoformat(e['date']).astimezone(UTC)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if event_utc > cutoff:
+            continue
+
+        events.append({
+            'country': 'US',
+            'impact': (e.get('impact') or '').lower(),
+            'time': event_utc.strftime('%Y-%m-%d %H:%M:%S'),
+            'event': e.get('title', 'Unknown'),
+        })
+
+    events.sort(key=lambda x: x['time'])
+
+    if events:
+        _empty_fetches = 0
+    else:
+        _empty_fetches += 1
+        if _empty_fetches >= _EMPTY_FETCH_WARN_THRESHOLD:
+            logger.warning(
+                f"Economic calendar has returned no US events "
+                f"{_empty_fetches} fetches running - the feed may have moved or "
+                f"started blocking us ({CALENDAR_URL})"
+            )
+
+    return events
 
 
 def get_upcoming_events(impact_levels=('high',), days_ahead=14, force_refresh=False):
@@ -113,7 +159,7 @@ def get_next_event_info(impact_levels=('high',)):
     if not events:
         return None
 
-    next_event = events[0]  # already sorted by time from Finnhub
+    next_event = events[0]  # _fetch_calendar returns them sorted by time
     delta = next_event['datetime_et'] - datetime.now(ET)
     minutes_until = int(delta.total_seconds() / 60)
 
@@ -145,13 +191,9 @@ def format_event_for_message(event_info, ref_time=None):
 # Test/debug interface
 if __name__ == '__main__':
     print("Testing calendar_events module...")
-    print(f"API key configured: {bool(FINNHUB_API_KEY)}")
+    print(f"Source: {CALENDAR_URL}")
 
-    if not FINNHUB_API_KEY:
-        print("Set FINNHUB_API_KEY in .env first")
-        exit(1)
-
-    print("\n=== High-impact events (next 14 days) ===")
+    print("\n=== High-impact events (this week) ===")
     events = get_upcoming_events(impact_levels=('high',))
     for e in events:
         print(f"  {e['datetime_et'].strftime('%a %m/%d %I:%M %p ET')} - {e['name']}")
